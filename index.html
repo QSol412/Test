@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="manifest.json"><meta name="theme-color" content="#2f5d8a"><title>Corporate Goblin (local)</title>
+<style>
+:root{--bg:#e8edf2;--panel:#fff;--ink:#1c2733;--mute:#667585;--line:#cfd8e1;--accent:#2f5d8a;--onaccent:#fff;--bot:#dde5ee}
+@media (prefers-color-scheme:dark){:root{--bg:#141a21;--panel:#1c242d;--ink:#e3e9ef;--mute:#8d9cab;--line:#2c3743;--accent:#6fa3d4;--onaccent:#0f1720;--bot:#26313c}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.55 "Noto Nastaliq Urdu","Segoe UI",system-ui,sans-serif;display:flex;flex-direction:column;max-width:760px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:1rem;margin:0;font-weight:600}
+header span{color:var(--mute);font-size:.8rem;margin-left:8px;font-weight:400}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:6px 12px}
+button.go{background:var(--accent);color:var(--onaccent);border-color:var(--accent)}
+button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#log{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:85%;padding:10px 14px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+.u{align-self:flex-end;background:var(--accent);color:var(--onaccent)}
+.b{align-self:flex-start;background:var(--bot)}
+.empty{margin:auto;color:var(--mute);text-align:center}
+#set{display:none;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel);font-size:.9rem}
+#set.open{display:block}
+#set label{display:block;margin-top:8px;color:var(--mute)}
+#set textarea,#set input{width:100%;font:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+form{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line);padding-bottom:max(12px,env(safe-area-inset-bottom))}
+#in{flex:1;font:inherit;resize:none;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 10px;max-height:140px}
+#files{display:block;margin:6px 0;width:100%}#st{color:var(--mute);font-size:.85rem;margin-top:6px}</style>
+</head>
+<body>
+<header><h1>Corporate Goblin<span>runs in this browser</span></h1><button id="gear" type="button">Settings</button></header>
+<div id="set" class="open">
+  <label for="files">First time only: pick model_q4.onnx, model_q4.onnx_data, tokenizer.json, tokenizer_config.json, config.json (generation_config.json optional). The page then saves them on this phone.</label>
+  <input id="files" type="file" multiple>
+  <button class="go" id="load" type="button">Load model</button> <button id="forget" type="button">Remove saved model</button>
+  <div id="st">Starting\u2026</div>
+  <label for="sys">System prompt (optional)</label><input id="sys" type="text" dir="auto">
+  <label for="max">Max new tokens</label><input id="max" type="number" value="200" min="1" max="1024">
+  <label for="temp">Temperature (0 = deterministic)</label><input id="temp" type="number" value="0.1" min="0" max="2" step="0.1">
+</div>
+<div id="log"><p class="empty">Load the model files first. Nothing is uploaded anywhere.</p></div>
+<form id="f">
+  <textarea id="in" rows="1" dir="auto" placeholder="Message" aria-label="Message"></textarea>
+  <button class="go" id="send" type="submit" disabled>Send</button>
+</form>
+<script type="module">
+const $=id=>document.getElementById(id);
+const LIB="https://cdn.jsdelivr.net/npm/@huggingface/transformers";
+const NEED=["model_q4.onnx","model_q4.onnx_data","tokenizer.json","tokenizer_config.json","config.json"];
+let gen=null,Streamer=null,history=[],busy=false;
+if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
+$("gear").onclick=()=>$("set").classList.toggle("open");
+function add(cls,text){const l=$("log");const e=l.querySelector(".empty");if(e)e.remove();const d=document.createElement("div");d.className="m "+cls;d.dir="auto";d.textContent=text;l.appendChild(d);l.scrollTop=l.scrollHeight;return d}
+async function saved(){try{const c=await caches.open("goblin-model");const fs={};for(const n of NEED){const r=await c.match("/m/"+n);if(!r)return null;fs[n]=r}
+  const o={};for(const n in fs)o[n]=await fs[n].blob();return o}catch(_){return null}}
+async function start(fs,fromPicker){
+  try{
+    $("st").textContent="Loading library\u2026 (needs internet the very first time only)";
+    const{env,pipeline,TextStreamer}=await import(LIB);Streamer=TextStreamer;
+    env.allowLocalModels=false;env.allowRemoteModels=true;env.remoteHost="https://local.invalid/";
+    env.useBrowserCache=false;env.useCustomCache=true;
+    env.customCache={match:async k=>{const f=fs[String(k.url||k).split("/").pop().split("?")[0]];return f?new Response(f,{headers:{"content-length":String(f.size)}}):undefined},put:async()=>{}};
+    $("st").textContent="Loading model (a minute on a phone)\u2026";
+    gen=await pipeline("text-generation","goblin",{device:navigator.gpu?"webgpu":"wasm",dtype:"q4"});
+    if(fromPicker){
+      $("st").textContent="Saving model on this phone\u2026";
+      try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist();const c=await caches.open("goblin-model");for(const n of NEED)await c.put("/m/"+n,new Response(fs[n]))}catch(e){$("st").textContent="Ready, but could not save for offline use: "+e.message;}
+    }
+    if(!$("st").textContent.startsWith("Ready, but"))$("st").textContent="Ready ("+(navigator.gpu?"WebGPU":"CPU/WASM, slower")+"). Saved for offline use.";
+    $("send").disabled=false;$("set").classList.remove("open");
+    const e=$("log").querySelector(".empty");if(e)e.textContent="Model ready. Say something.";
+  }catch(e){$("st").textContent="Failed: "+e.message}
+}
+$("load").onclick=()=>{
+  const fs={};for(const f of $("files").files)fs[f.name]=f;
+  const miss=NEED.filter(n=>!fs[n]);
+  if(miss.length){$("st").textContent="Missing: "+miss.join(", ");return}
+  start(fs,true)};
+$("forget").onclick=async()=>{await caches.delete("goblin-model");$("st").textContent="Saved model removed. Pick the files again to reload it."};
+$("in").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();$("f").requestSubmit()}});
+$("f").onsubmit=async ev=>{
+  ev.preventDefault();if(!gen||busy)return;
+  const text=$("in").value.trim();if(!text)return;
+  $("in").value="";add("u",text);history.push({role:"user",content:text});
+  const out=add("b","\u2026");let acc="";busy=true;$("send").disabled=true;
+  const msgs=($("sys").value?[{role:"system",content:$("sys").value}]:[]).concat(history);
+  const t=+$("temp").value;
+  try{
+    const st=new Streamer(gen.tokenizer,{skip_prompt:true,skip_special_tokens:true,callback_function:p=>{acc+=p;out.textContent=acc;$("log").scrollTop=$("log").scrollHeight}});
+    await gen(msgs,{max_new_tokens:+$("max").value,do_sample:t>0,temperature:t||undefined,streamer:st});
+    history.push({role:"assistant",content:acc});
+  }catch(e){out.textContent="Error: "+e.message}
+  busy=false;$("send").disabled=false;
+};
+(async()=>{const fs=await saved();if(fs){$("st").textContent="Saved model found.";start(fs,false)}else $("st").textContent="No saved model yet. Pick the files below."})();
+</script>
+</body>
+</html>
